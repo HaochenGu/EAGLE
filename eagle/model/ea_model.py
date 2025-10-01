@@ -201,12 +201,14 @@ class EaModel(nn.Module):
             max_length=2048,
             log=False,
             is_llama3=False,
-
+            return_logits=False
     ):
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
 
-
+        if return_logits:
+            all_draft_logits = []
+            all_target_logits = []
         if temperature > 1e-5:
             logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
         else:
@@ -237,10 +239,13 @@ class EaModel(nn.Module):
 
         input_len = input_ids.shape[1]
         reset_tree_mode(self)
-        # prefill
-        draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token = initialize_tree(
-            input_ids, self, past_key_values, logits_processor
+        # prefill: build first draft tree and optionally collect draft logits for it
+        draft_tokens, retrieve_indices, tree_mask, tree_position_ids, prefill_target_logits_all, hidden_state, sample_token, init_draft_logits = initialize_tree(
+            input_ids, self, past_key_values, logits_processor, return_logits=return_logits
         )
+        if return_logits and init_draft_logits is not None:
+            all_draft_logits.append(init_draft_logits)
+
         new_token = 0
         max_length = max_length - self.ea_layer.total_tokens - 10
         for idx in range(max_length):
@@ -249,14 +254,23 @@ class EaModel(nn.Module):
 
             draft_tokens = draft_tokens.to(input_ids.device)
             # Target model forward, get logits
-            logits, hidden_state_new, outputs = tree_decoding(
+            td_out = tree_decoding(
                 self,
                 draft_tokens,
                 past_key_values,
                 tree_position_ids,
                 input_ids,
                 retrieve_indices,
+                return_logits=return_logits,
             )
+            if return_logits:
+                if isinstance(td_out, tuple) and len(td_out) == 4:
+                    logits, hidden_state_new, outputs, node_target_logits = td_out
+                    all_target_logits.append(node_target_logits)
+                else:
+                    logits, hidden_state_new, outputs = td_out
+            else:
+                logits, hidden_state_new, outputs = td_out
             # retrieve_indices=tree_buffers["retrieve_indices"]
             # logits = logits[0, retrieve_indices]
             draft_tokens = torch.cat((draft_tokens, padding), dim=1)
@@ -267,7 +281,7 @@ class EaModel(nn.Module):
             )
             # print(accept_length)
             # Adjusting the input sequence, draft model forward
-            input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, hidden_state, sample_token = update_inference_inputs(
+            input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, hidden_state, sample_token, next_draft_logits = update_inference_inputs(
                 input_ids,
                 candidates,
                 best_candidate,
@@ -279,8 +293,11 @@ class EaModel(nn.Module):
                 current_length_data,
                 self,
                 hidden_state_new,
-                sample_p
+                sample_p,
+                return_logits=return_logits
             )
+            if return_logits and next_draft_logits is not None:
+                all_draft_logits.append(next_draft_logits)
 
             if is_llama3:
                 if stop_token_id in input_ids[0, input_len:].tolist():
@@ -293,8 +310,12 @@ class EaModel(nn.Module):
             if input_ids.shape[1] > max_length:
                 break
         if not log:
+            if return_logits:
+                return input_ids, all_draft_logits, all_target_logits
             return input_ids
         else:
+            if return_logits:
+                return input_ids, new_token, idx, all_draft_logits, all_target_logits
             return input_ids, new_token, idx
 
     @torch.no_grad()
@@ -421,7 +442,7 @@ class EaModel(nn.Module):
 
         input_len = input_ids.shape[1]
         reset_tree_mode(self)
-        draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token = initialize_tree(
+        draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token, _ = initialize_tree(
             input_ids, self, past_key_values, logits_processor
         )
         new_token = 0
@@ -449,7 +470,7 @@ class EaModel(nn.Module):
             )
             # print(accept_length)
             # with Timer("update_inference_inputs"):
-            input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, hidden_state, sample_token = update_inference_inputs(
+            input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, hidden_state, sample_token, _ = update_inference_inputs(
                 input_ids,
                 candidates,
                 best_candidate,

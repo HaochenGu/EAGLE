@@ -667,7 +667,7 @@ class Model(nn.Module):
         self.stable_kv = None
 
     @torch.no_grad()
-    def topK_genrate(self, hidden_states, input_ids, head, logits_processor):
+    def topK_genrate(self, hidden_states, input_ids, head, logits_processor, return_logits: bool = False):
 
         input_ids = input_ids.to(hidden_states.device)
         total_tokens = self.total_tokens
@@ -679,6 +679,7 @@ class Model(nn.Module):
         scores_list = []
         parents_list = []
         ss_token = []
+        selected_logits_pieces = []
 
         input_ids = input_ids[:, 1:]
         input_ids = input_ids.to(hidden_states.device)
@@ -702,6 +703,8 @@ class Model(nn.Module):
         last_p = self.logsoftmax(last_headout)
         top = torch.topk(last_p, top_k, dim=-1)
         topk_index, topk_p = top.indices, top.values
+        root_selected_logits = last_headout.gather(1, topk_index)
+        selected_logits_pieces.append(root_selected_logits)
         scores = topk_p[0]
         scores_list.append(scores[None])
         parents_list.append(torch.zeros(1, dtype=torch.long, device=scores.device))
@@ -736,6 +739,8 @@ class Model(nn.Module):
 
             top = torch.topk(last_p, top_k, dim=-1)
             topk_index, topk_p = top.indices, top.values
+            step_selected_logits = last_headout.gather(1, topk_index)
+            selected_logits_pieces.append(step_selected_logits)
 
             cu_scores = topk_p + scores[:, None]
 
@@ -765,6 +770,10 @@ class Model(nn.Module):
 
         draft_tokens = ss_token_list[top_scores_index]
         draft_tokens = torch.cat((sample_token, draft_tokens), dim=0)
+
+        selected_logits_flat = torch.cat(selected_logits_pieces, dim=0).view(-1)
+        draft_node_logits = selected_logits_flat[top_scores_index]
+        self._last_draft_logits = draft_node_logits
 
         draft_parents = torch.cat(parents_list, dim=0)[top_scores_index // top_k].long()
         mask_index = torch.searchsorted(top_scores_index, draft_parents - 1, right=False)
@@ -824,7 +833,9 @@ class Model(nn.Module):
         del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
         tree_position_ids = tree_position_ids.to(hidden_states.device)
 
-        return draft_tokens, retrieve_indices, tree_mask, tree_position_ids
+        if return_logits:
+            return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, self._last_draft_logits
+        return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, None
 
 
 
