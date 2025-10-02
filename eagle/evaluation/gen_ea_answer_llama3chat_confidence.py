@@ -6,6 +6,7 @@ python3 gen_model_answer.py --model-path lmsys/fastchat-t5-3b-v1.0 --model-id fa
 import argparse
 import json
 import os
+import numpy as np
 script_dir = os.path.dirname(__file__)
 parent_dir = os.path.dirname(script_dir)
 # os.environ["CUDA_VISIBLE_DEVICES"] = "7"
@@ -27,7 +28,8 @@ except:
     from eagle.model.kv_cache import initialize_past_key_values
     from eagle.model.utils import *
 
-
+target_distribution = torch.zeros(128256).cuda()
+draft_distribution = torch.zeros(32000).cuda()
 
 def run_eval(
         base_model_path,
@@ -101,6 +103,7 @@ def get_model_answers(
         args
 ):
     # temperature = 0.0
+    global target_distribution, draft_distribution
 
     model = EaModel.from_pretrained(
         base_model_path=base_model_path,
@@ -168,10 +171,11 @@ def get_model_answers(
                     is_llama3=True,
                     return_logits=True,
                 )
+                for draft_logit, target_logit in zip(draft_logits, target_logits):
+                    draft_distribution += torch.softmax(draft_logit, dim=-1).sum(dim=0)
+                    target_distribution += torch.softmax(target_logit, dim=-1).sum(dim=0)
 
-                print(draft_logits.shape)
-                print(target_logits.shape)
-                exit()
+
                 torch.cuda.synchronize()
                 total_time = time.time() - start_time
                 output_ids = output_ids[0][len(input_ids[0]):]
@@ -227,6 +231,8 @@ def get_model_answers(
                 "tstamp": time.time(),
             }
             fout.write(json.dumps(ans_json) + "\n")
+        
+    target_distribution = target_distribution[model.ea_layer.t2d]
 
 
 def reorg_answer_file(answer_file):
@@ -371,3 +377,46 @@ if __name__ == "__main__":
     )
 
     reorg_answer_file(answer_file)
+    import numpy as np
+    import torch
+    import matplotlib.pyplot as plt
+    
+    print(target_distribution)
+    print(draft_distribution)
+
+    # Convert to numpy for plotting
+    draft_dist_cpu = draft_distribution.cpu().numpy()
+    target_dist_cpu = target_distribution.cpu().numpy()
+
+    # Plot both distributions
+    plt.figure(figsize=(14, 6))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(draft_dist_cpu, label='Draft Distribution', alpha=0.7, linewidth=1.5)
+    plt.plot(target_dist_cpu, label='Target Distribution', alpha=0.7, linewidth=1.5)
+    plt.xlabel('Token Index')
+    plt.ylabel('Average Probability')
+    plt.title('Draft vs Target Distribution')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.subplot(1, 2, 2)
+    percentage_error = (draft_dist_cpu - target_dist_cpu) / target_dist_cpu
+    plt.plot(percentage_error, label='Percentage Error', color='red', alpha=0.7)
+    plt.axhline(y=0, color='black', linestyle='--', linewidth=0.8)
+    plt.xlabel('Token Index')
+    plt.ylabel('Percentage Error')
+    plt.title('Percentage Error: (Draft - Target) / Target')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig('distribution_comparison.png', dpi=150, bbox_inches='tight')
+    print(f"Plot saved to distribution_comparison.png")
+    print(f"\nStatistics:")
+    print(f"Draft - Mean: {draft_dist_cpu.mean():.6f}, Std: {draft_dist_cpu.std():.6f}")
+    print(f"Target - Mean: {target_dist_cpu.mean():.6f}, Std: {target_dist_cpu.std():.6f}")
+    print(f"Percentage Error - Mean: {percentage_error.mean():.6f}, Std: {percentage_error.std():.6f}")
+    print(f"Percentage Error - Min: {percentage_error.min():.6f}, Max: {percentage_error.max():.6f}")
+    print(percentage_error)
+    plt.show()

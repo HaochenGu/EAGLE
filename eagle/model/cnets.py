@@ -679,7 +679,9 @@ class Model(nn.Module):
         scores_list = []
         parents_list = []
         ss_token = []
-        selected_logits_pieces = []
+        # For logging full draft logits per candidate node in the same
+        # flattened order as scores_list/ss_token_list.
+        logits_full_pieces = []
 
         input_ids = input_ids[:, 1:]
         input_ids = input_ids.to(hidden_states.device)
@@ -703,8 +705,10 @@ class Model(nn.Module):
         last_p = self.logsoftmax(last_headout)
         top = torch.topk(last_p, top_k, dim=-1)
         topk_index, topk_p = top.indices, top.values
-        root_selected_logits = last_headout.gather(1, topk_index)
-        selected_logits_pieces.append(root_selected_logits)
+        # Repeat the same root distribution top_k times to align with
+        # the root candidate nodes layout [1, top_k].
+        root_full_logits = last_headout.expand(top_k, -1)
+        logits_full_pieces.append(root_full_logits)
         scores = topk_p[0]
         scores_list.append(scores[None])
         parents_list.append(torch.zeros(1, dtype=torch.long, device=scores.device))
@@ -739,8 +743,10 @@ class Model(nn.Module):
 
             top = torch.topk(last_p, top_k, dim=-1)
             topk_index, topk_p = top.indices, top.values
-            step_selected_logits = last_headout.gather(1, topk_index)
-            selected_logits_pieces.append(step_selected_logits)
+            # For each of the top_k frontier nodes, replicate its distribution
+            # across its top_k expansions to match the [top_k, top_k] layout.
+            step_full_logits = last_headout.unsqueeze(1).expand(top_k, top_k, last_headout.shape[-1]).reshape(-1, last_headout.shape[-1])
+            logits_full_pieces.append(step_full_logits)
 
             cu_scores = topk_p + scores[:, None]
 
@@ -771,9 +777,11 @@ class Model(nn.Module):
         draft_tokens = ss_token_list[top_scores_index]
         draft_tokens = torch.cat((sample_token, draft_tokens), dim=0)
 
-        selected_logits_flat = torch.cat(selected_logits_pieces, dim=0).view(-1)
-        draft_node_logits = selected_logits_flat[top_scores_index]
-        self._last_draft_logits = draft_node_logits
+        # Flatten full logits to match the flattened node ordering,
+        # then pick the selected nodes by top_scores_index.
+        logits_full_flat = torch.cat([p.reshape(-1, last_headout.shape[-1]) for p in logits_full_pieces], dim=0)
+        draft_node_full_logits = logits_full_flat[top_scores_index]
+        self._last_draft_logits = draft_node_full_logits
 
         draft_parents = torch.cat(parents_list, dim=0)[top_scores_index // top_k].long()
         mask_index = torch.searchsorted(top_scores_index, draft_parents - 1, right=False)

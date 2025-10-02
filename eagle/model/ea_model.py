@@ -239,12 +239,13 @@ class EaModel(nn.Module):
 
         input_len = input_ids.shape[1]
         reset_tree_mode(self)
-        # prefill: build first draft tree and optionally collect draft logits for it
+        # prefill: build first draft tree and optionally collect its draft logits
         draft_tokens, retrieve_indices, tree_mask, tree_position_ids, prefill_target_logits_all, hidden_state, sample_token, init_draft_logits = initialize_tree(
             input_ids, self, past_key_values, logits_processor, return_logits=return_logits
         )
-        if return_logits and init_draft_logits is not None:
-            all_draft_logits.append(init_draft_logits)
+        # Hold the draft logits for the tree currently being verified; append
+        # only after we also recorded the corresponding target logits.
+        current_draft_logits = init_draft_logits if return_logits else None
 
         new_token = 0
         max_length = max_length - self.ea_layer.total_tokens - 10
@@ -266,6 +267,9 @@ class EaModel(nn.Module):
             if return_logits:
                 if isinstance(td_out, tuple) and len(td_out) == 4:
                     logits, hidden_state_new, outputs, node_target_logits = td_out
+                    # Pair the current tree's draft logits with its target logits
+                    if current_draft_logits is not None:
+                        all_draft_logits.append(current_draft_logits)
                     all_target_logits.append(node_target_logits)
                 else:
                     logits, hidden_state_new, outputs = td_out
@@ -296,8 +300,9 @@ class EaModel(nn.Module):
                 sample_p,
                 return_logits=return_logits
             )
-            if return_logits and next_draft_logits is not None:
-                all_draft_logits.append(next_draft_logits)
+            if return_logits:
+                # Set the draft logits for the tree that will be verified next loop
+                current_draft_logits = next_draft_logits
 
             if is_llama3:
                 if stop_token_id in input_ids[0, input_len:].tolist():
