@@ -395,7 +395,7 @@ if __name__ == "__main__":
     plt.plot(draft_dist_cpu, label='Draft Distribution', alpha=0.7, linewidth=1.5)
     plt.plot(target_dist_cpu, label='Target Distribution', alpha=0.7, linewidth=1.5)
     plt.xlabel('Token Index')
-    plt.ylabel('Average Probability')
+    plt.ylabel('Probability')
     plt.title('Draft vs Target Distribution')
     plt.legend()
     plt.grid(True, alpha=0.3)
@@ -403,7 +403,6 @@ if __name__ == "__main__":
     plt.subplot(1, 2, 2)
     percentage_error = (draft_dist_cpu - target_dist_cpu) / target_dist_cpu
     plt.plot(percentage_error, label='Percentage Error', color='red', alpha=0.7)
-    plt.axhline(y=0, color='black', linestyle='--', linewidth=0.8)
     plt.xlabel('Token Index')
     plt.ylabel('Percentage Error')
     plt.title('Percentage Error: (Draft - Target) / Target')
